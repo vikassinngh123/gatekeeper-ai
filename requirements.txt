@@ -1,0 +1,7 @@
+streamlit
+opencv-python-headless
+numpy
+Pillow
+face_recognition
+ultralytics
+streamlit-drawable-canvas
