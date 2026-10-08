@@ -117,59 +117,87 @@ with tab3:
         if run_camera:
             cap = cv2.VideoCapture(0)
 
+            # Frame skipping counter and identity cache
+            frame_count = 0
+            cached_name = "UNKNOWN"
+
             while run_camera:
                 ret, frame = cap.read()
                 if not ret:
                     st.error("Failed to grab frame.")
                     break
 
-                # Draw the restricted zone on the frame
+                frame_count += 1
+
+
                 cv2.polylines(frame, [st.session_state.restricted_zone], True, (0, 255, 255), 2)
 
-                results = model(frame, stream=True, verbose=False)
+                # (using imgsz=320 for a massive speed boost)
+                results = model(frame, imgsz=320, stream=True, verbose=False)
 
                 for result in results:
                     for box in result.boxes:
-                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5: # Person detected
+                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:  # Person detected
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+
+                            h, w, _ = frame.shape
+                            x1, y1 = max(0, x1), max(0, y1)
+                            x2, y2 = min(w, x2), min(h, y2)
+
                             foot_point = (int((x1 + x2) / 2), y2)
 
-
+                            # 2. Check if person is in restricted zone
                             is_inside = cv2.pointPolygonTest(st.session_state.restricted_zone, foot_point, False) >= 0
 
                             label = "Person"
-                            box_color = (255, 0, 0) # Default Blue for people outside
+                            box_color = (255, 0, 0)  # Blue outside zone
 
                             if is_inside:
 
-                                face_crop = frame[max(0, y1):int(y1+(y2-y1)/2), max(0, x1):x2]
-                                rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+                                head_bottom = y1 + max(1, int((y2 - y1) * 0.5))
+                                face_crop = frame[y1:head_bottom, x1:x2]
 
-                                face_locations = face_recognition.face_locations(rgb_crop)
-                                face_encs = face_recognition.face_encodings(rgb_crop, face_locations)
+                                # Safety check: Ensuring crop is valid and non-empty
+                                if face_crop.size > 0 and face_crop.shape[0] > 20 and face_crop.shape[1] > 20:
 
-                                name = "UNKNOWN"
-                                if len(face_encs) > 0 and len(st.session_state.known_encodings) > 0:
-                                    matches = face_recognition.compare_faces(st.session_state.known_encodings, face_encs[0], tolerance=0.5)
-                                    if True in matches:
-                                        first_match_index = matches.index(True)
-                                        name = st.session_state.known_names[first_match_index]
+                                    # Runing face recognition only once every 10 frames for better fps
+                                    if frame_count % 10 == 0:
+                                        face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
 
-                                if name == "UNKNOWN":
+                                        # Downscaling by 50%
+                                        face = cv2.resize(face_rgb, (0, 0), fx=0.5, fy=0.5)
+                                        face = np.ascontiguousarray(small_rgb, dtype=np.uint8)
+
+                                        face_locations = face_recognition.face_locations(face)
+                                        face_encs = face_recognition.face_encodings(face, face_locations)
+
+                                        matched_name = "UNKNOWN"
+                                        if len(face_encs) > 0 and len(st.session_state.known_encodings) > 0:
+                                            matches = face_recognition.compare_faces(
+                                                st.session_state.known_encodings, face_encs[0], tolerance=0.5
+                                            )
+                                            if True in matches:
+                                                matched_name = st.session_state.known_names[matches.index(True)]
+
+                                        cached_name = matched_name
+
+                                # Apply status label based on cached face ID
+                                if cached_name == "UNKNOWN":
                                     label = "🚨 INTRUDER"
-                                    box_color = (0, 0, 255) # Red
-                                    cv2.putText(frame, "BREACH DETECTED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+                                    box_color = (0, 0, 255)  # Red
+                                    cv2.putText(frame, "BREACH DETECTED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
                                 else:
-                                    label = f"✅ Authorized: {name}"
-                                    box_color = (0, 255, 0) # Green
+                                    label = f"✅ Authorized: {cached_name}"
+                                    box_color = (0, 255, 0)  # Green
 
 
                             cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
-                            cv2.circle(frame, foot_point, 6, box_color, -1)
-                            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+                            cv2.circle(frame, foot_point, 5, box_color, -1)
+                            cv2.putText(frame, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
 
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_window.image(frame)
+                frame_window.image(frame, channels="RGB")
 
             cap.release()
