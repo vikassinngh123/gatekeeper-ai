@@ -11,14 +11,11 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
-import face_recognition
 from streamlit_drawable_canvas import st_canvas
-
-from vision_utils import load_yolo_model, encode_face
+from vision_utils import load_yolo_model, load_face_model, encode_face, trigger_intruder_alert
 
 st.set_page_config(page_title="GateKeeper AI", layout="wide")
 st.title("🛡️ GateKeeper AI: Enterprise Security")
-
 
 if "known_encodings" not in st.session_state:
     st.session_state.known_encodings = []
@@ -28,7 +25,7 @@ if "restricted_zone" not in st.session_state:
     st.session_state.restricted_zone = None
 
 model = load_yolo_model()
-
+detector, recognizer = load_face_model()
 
 tab1, tab2, tab3 = st.tabs(["👤 1. Face Enrollment", "📐 2. Setup Zone", "🚨 3. Live Monitor"])
 
@@ -38,23 +35,19 @@ tab1, tab2, tab3 = st.tabs(["👤 1. Face Enrollment", "📐 2. Setup Zone", "�
 with tab1:
     st.header("Register Authorized Personnel")
     col1, col2 = st.columns(2)
-
     with col1:
         emp_name = st.text_input("Employee Name:")
-
         uploaded_file = st.file_uploader("Upload Face Image", type=["jpg", "jpeg", "png"])
 
         if st.button("Register Face") and uploaded_file is not None and emp_name:
+            feature = encode_face(uploaded_file, detector, recognizer)
 
-            encodings = encode_face(uploaded_file)
-
-            if len(encodings) > 0:
-                st.session_state.known_encodings.append(encodings[0])
+            if feature is not None:
+                st.session_state.known_encodings.append(feature)
                 st.session_state.known_names.append(emp_name)
                 st.success(f"Successfully registered: {emp_name}")
             else:
                 st.error("No face detected in the image. Try a clearer picture.")
-
     with col2:
         st.write("### Authorized Database")
         if len(st.session_state.known_names) > 0:
@@ -69,17 +62,15 @@ with tab1:
 with tab2:
     st.header("Draw the Restricted Perimeter")
     st.write("Draw a rectangle over the camera feed to define the secure zone.")
-
-    cap = cv2.VideoCapture(0) # Change to "test_demo.mp4" if testing on video
+    cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
     cap.release()
 
     if ret:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         bg_image = Image.fromarray(frame_rgb)
-
         canvas_result = st_canvas(
-            fill_color="rgba(255, 0, 0, 0.3)",  # Transparent Red
+            fill_color="rgba(255, 0, 0, 0.3)",
             stroke_width=3,
             stroke_color="#FF0000",
             background_image=bg_image,
@@ -89,12 +80,10 @@ with tab2:
             key="canvas",
         )
 
-        # Save coordinates to session state when drawn
         if canvas_result.json_data is not None and len(canvas_result.json_data["objects"]) > 0:
-            box = canvas_result.json_data["objects"][-1] # Get latest drawn box
+            box = canvas_result.json_data["objects"][-1]
             x1, y1 = int(box["left"]), int(box["top"])
             x2, y2 = int(box["left"] + box["width"]), int(box["top"] + box["height"])
-
             st.session_state.restricted_zone = np.array([
                 [x1, y1], [x2, y1], [x2, y2], [x1, y2]
             ], dtype=np.int32)
@@ -103,11 +92,10 @@ with tab2:
         st.error("Could not access camera for zone setup.")
 
 # ==========================================
-# TAB 3: LIVE MONITOR (YOLO + Face Rec)
+# TAB 3: LIVE MONITOR
 # ==========================================
 with tab3:
     st.header("Live Security Feed")
-
     if st.session_state.restricted_zone is None:
         st.warning("Please setup the restricted zone in Tab 2 first!")
     else:
@@ -116,8 +104,6 @@ with tab3:
 
         if run_camera:
             cap = cv2.VideoCapture(0)
-
-            # Frame skipping counter and identity cache
             frame_count = 0
             cached_name = "UNKNOWN"
 
@@ -128,74 +114,71 @@ with tab3:
                     break
 
                 frame_count += 1
-
-
                 cv2.polylines(frame, [st.session_state.restricted_zone], True, (0, 255, 255), 2)
 
-                # (using imgsz=320 for a massive speed boost)
                 results = model(frame, imgsz=320, stream=True, verbose=False)
 
                 for result in results:
                     for box in result.boxes:
-                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:  # Person detected
+                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.5:
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
-
 
                             h, w, _ = frame.shape
                             x1, y1 = max(0, x1), max(0, y1)
                             x2, y2 = min(w, x2), min(h, y2)
-
                             foot_point = (int((x1 + x2) / 2), y2)
 
-                            # 2. Check if person is in restricted zone
                             is_inside = cv2.pointPolygonTest(st.session_state.restricted_zone, foot_point, False) >= 0
 
                             label = "Person"
-                            box_color = (255, 0, 0)  # Blue outside zone
+                            box_color = (255, 0, 0)
 
                             if is_inside:
+                                if frame_count % 5 == 0:
+                                    head_bottom = y1 + max(1, int((y2 - y1) * 0.5))
+                                    face_crop = frame[y1:head_bottom, x1:x2]
+                                    matched_name = "UNKNOWN"
 
-                                head_bottom = y1 + max(1, int((y2 - y1) * 0.5))
-                                face_crop = frame[y1:head_bottom, x1:x2]
+                                    if face_crop.size > 0 and face_crop.shape[0] > 20 and face_crop.shape[1] > 20:
+                                        crop_h, crop_w, _ = face_crop.shape
+                                        detector.setInputSize((crop_w, crop_h))
+                                        _, faces = detector.detect(face_crop)
 
-                                # Safety check: Ensuring crop is valid and non-empty
-                                if face_crop.size > 0 and face_crop.shape[0] > 20 and face_crop.shape[1] > 20:
+                                        if faces is not None and len(faces) > 0:
+                                            aligned_face = recognizer.alignCrop(face_crop, faces[0])
+                                            face_feature = recognizer.feature(aligned_face)
 
-                                    # Runing face recognition only once every 10 frames for better fps
-                                    if frame_count % 10 == 0:
-                                        face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+                                            best_score = 0
+                                            best_match_idx = -1
 
-                                        # Downscaling by 50%
-                                        face = cv2.resize(face_rgb, (0, 0), fx=0.5, fy=0.5)
-                                        face = np.ascontiguousarray(small_rgb, dtype=np.uint8)
+                                            for idx, known_feat in enumerate(st.session_state.known_encodings):
+                                                score = recognizer.match(known_feat, face_feature, cv2.FaceRecognizerSF_FR_COSINE)
+                                                if score >= 0.363 and score > best_score:
+                                                    best_score = score
+                                                    best_match_idx = idx
 
-                                        face_locations = face_recognition.face_locations(face)
-                                        face_encs = face_recognition.face_encodings(face, face_locations)
+                                            if best_match_idx != -1:
+                                                matched_name = st.session_state.known_names[best_match_idx]
 
-                                        matched_name = "UNKNOWN"
-                                        if len(face_encs) > 0 and len(st.session_state.known_encodings) > 0:
-                                            matches = face_recognition.compare_faces(
-                                                st.session_state.known_encodings, face_encs[0], tolerance=0.5
-                                            )
-                                            if True in matches:
-                                                matched_name = st.session_state.known_names[matches.index(True)]
+                                    cached_name = matched_name
 
-                                        cached_name = matched_name
-
-                                # Apply status label based on cached face ID
                                 if cached_name == "UNKNOWN":
                                     label = "🚨 INTRUDER"
-                                    box_color = (0, 0, 255)  # Red
+                                    box_color = (0, 0, 255)
                                     cv2.putText(frame, "BREACH DETECTED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
+                                    trigger_intruder_alert(
+                                                           sender="sandeepsandeep3198059@gmail.com",
+                                                           app_password="plnntyaownmyoslf",
+                                                           receiver="vikassinghpcgd@gmail.com"
+                                                           )
                                 else:
                                     label = f"✅ Authorized: {cached_name}"
-                                    box_color = (0, 255, 0)  # Green
-
+                                    box_color = (0, 255, 0)
 
                             cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
                             cv2.circle(frame, foot_point, 5, box_color, -1)
                             cv2.putText(frame, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
-
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_window.image(frame, channels="RGB")
