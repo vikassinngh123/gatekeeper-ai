@@ -1,7 +1,8 @@
-streamlit
-opencv-python-headless
-numpy
-Pillow
-face_recognition
-ultralytics
-streamlit-drawable-canvas
+streamlit>=1.30.0
+ultralytics>=8.1.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=9.5.0
+streamlit-drawable-canvas>=0.9.3
+torch>=2.0.0
+torchvision>=0.15.0

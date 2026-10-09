@@ -7,17 +7,94 @@ Original file is located at
     https://colab.research.google.com/drive/1kjyKo3CAG9q5aM2b50w6aUvNKM-6rP_o
 """
 
+import cv2
+import numpy as np
 import streamlit as st
-import face_recognition
 from ultralytics import YOLO
+
+import time
+import threading
+import smtplib
+from email.message import EmailMessage
 
 @st.cache_resource
 def load_yolo_model():
     return YOLO("yolov8n.pt")
 
-def encode_face(uploaded_file):
-    image = face_recognition.load_image_file(uploaded_file)
-    encodings = face_recognition.face_encodings(image)
-    if len(encodings) > 0:
-        return encodings[0]
+@st.cache_resource
+def load_face_model():
+
+    detector = cv2.FaceDetectorYN.create(
+                                         "face_detection_yunet_2023mar.onnx",
+                                         "",
+                                         (320, 320),
+                                         0.9,
+                                         0.3,
+                                         5000
+                                        )
+    recognizer = cv2.FaceRecognizerSF.create(
+                                              "face_recognition_sface_2021dec.onnx",
+                                              ""
+                                            )
+
+    return detector, recognizer
+
+
+
+def encode_face(uploaded_file,detector, recognizer):
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+
+    if img is None:
+      return None
+
+    detector.setInputSize((img.shape[1], img.shape[0]))
+    _, faces = detector.detect(img)
+
+    if faces is not None and len(faces) > 0:
+      aligned_face = recognizer.alignCrop(img, faces[0])
+      features = recognizer.feature(aligned_face)
+      return features
+
     return None
+
+LAST_EMAIL_SENT = 0
+EMAIL_COOLDOWN = 60
+
+def _send_email_worker(sender_email, app_password, receiver_email):
+    """Worker function executed in a background thread."""
+    SMTP_SERVER="smtp.gmail.com"
+    SMTP_PORT=587
+
+    msg = EmailMessage()
+    msg["Subject"] = "🚨 GateKeeper AI: Intruder Breach Detected"
+    msg["From"] = sender_email
+    msg["To"] = receiver_email
+    msg.set_content(
+        f"An unauthorized perimeter breach was detected at {time.strftime('%Y-%m-%d %H:%M:%S')}."
+    )
+
+    try:
+      with smtplib.SMTP(SMTP_SERVER,SMTP_PORT, timeout=100) as server:
+        server.starttls()
+        server.login(sender_email, app_password)
+        server.send_message(msg)
+      print("[GateKeeper AI] Alert email dispatched successfully.")
+    except Exception as e:
+      print(f"[GateKeeper AI] Error sending alert email: {e}")
+
+def trigger_intruder_alert(sender, app_password, receiver):
+    """Trigger an intruder alert."""
+    global LAST_EMAIL_SENT
+    current_time = time.time()
+
+    if current_time - LAST_EMAIL_SENT > EMAIL_COOLDOWN:
+        LAST_EMAIL_SENT = current_time
+
+        #Dispatching this via background thread so video stream/feed does not stutter
+        email_thread = threading.Thread(
+                                        target=_send_email_worker,
+                                        args=(sender, app_password, receiver),
+                                        daemon=True
+                                        )
+        email_thread.start()
